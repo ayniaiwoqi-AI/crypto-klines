@@ -72,18 +72,39 @@ def calc_rsi(closes: np.array, period: int = 14) -> float:
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def load_oi_fr_cache() -> dict:
-    """加载本地 OI/FR 缓存（FR 用，OI 方向改查 InfluxDB）"""
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE) as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+CACHE_TTL_HOURS = 2  # 缓存超过2小时视为过期
 
-def fetch_oi_direction_from_influx(symbols: list[str]) -> dict:
-    """从 InfluxDB 批量查最近 3h OI，分批返回 {symbol: '↑OI'/'↓OI'/'→OI'}"""
+def load_oi_fr_cache() -> dict:
+    """加载本地 OI/FR 缓存（FR 用，OI 方向改查 InfluxDB），超时标记fresh=False"""
+    if not os.path.exists(CACHE_FILE):
+        return {}
+    try:
+        with open(CACHE_FILE) as f:
+            raw = json.load(f)
+    except Exception:
+        return {}
+
+    now = datetime.now()
+    stale_count = 0
+    for sym, data in raw.items():
+        updated_str = data.get("updated", "")
+        try:
+            updated = datetime.fromisoformat(updated_str)
+            age_h = (now - updated).total_seconds() / 3600
+            data["fresh"] = age_h <= CACHE_TTL_HOURS
+            if not data["fresh"]:
+                stale_count += 1
+        except Exception:
+            data["fresh"] = False
+            stale_count += 1
+
+    if stale_count > 0:
+        print(f"  [WARN] OI/FR缓存 {stale_count} 个币数据超过{CACHE_TTL_HOURS}h")
+    return raw
+
+def fetch_oi_direction_from_influx(symbols: list[str], oi_thresh: float = 0.005) -> dict:
+    """从 InfluxDB 批量查最近 3h OI，分批返回 {symbol: '↑OI'/'↓OI'/'→OI'}
+    oi_thresh: OI 变化百分比阈值（默认 0.5%），波动大时用 ATR 归一化阈值替代硬编码"""
     import requests as _req
     from collections import defaultdict
     token = "influx-token-crypto-2026"
@@ -127,9 +148,10 @@ def fetch_oi_direction_from_influx(symbols: list[str]) -> dict:
                     oi_dir[sym] = "→OI"
                     continue
                 pct = (curr_val - old_val) / old_val * 100
-                if pct > 0.5:
+                thresh = oi_thresh.get(sym, 0.005) if isinstance(oi_thresh, dict) else oi_thresh
+                if pct > thresh:
                     oi_dir[sym] = "↑OI"
-                elif pct < -0.5:
+                elif pct < -thresh:
                     oi_dir[sym] = "↓OI"
                 else:
                     oi_dir[sym] = "→OI"
@@ -160,6 +182,46 @@ def find_peaks_valleys(data: np.array, distance: int = 15, prominence_pct: float
     peaks, _ = find_peaks(data, distance=distance, prominence=prom)
     valleys, _ = find_peaks(-data, distance=distance, prominence=prom)
     return peaks, valleys
+
+# ========== 本地 CVD 缓存（避免每轮全量重算） ==========
+def load_local_cvd_cache(symbol: str) -> tuple:
+    """返回 (peaks数组, valleys数组)，不存在则返回空数组"""
+    import json as _json
+    peaks_file = f"{KLINES_DIR}/.cvd_peaks_{symbol}.json"
+    valleys_file = f"{KLINES_DIR}/.cvd_valleys_{symbol}.json"
+    peaks, valleys = np.array([]), np.array([])
+    if os.path.exists(peaks_file):
+        try:
+            with open(peaks_file) as f:
+                raw = _json.load(f)
+            if isinstance(raw, list):
+                peaks = np.array(raw)
+        except Exception:
+            pass
+    if os.path.exists(valleys_file):
+        try:
+            with open(valleys_file) as f:
+                raw = _json.load(f)
+            if isinstance(raw, list):
+                valleys = np.array(raw)
+        except Exception:
+            pass
+    return peaks, valleys
+
+def calc_atr_threshold(closes: np.array, period: int = 20) -> float:
+    """计算 ATR 阈值（用于 OI 方向判断的波动率归一化）"""
+    if len(closes) < period + 1:
+        return 0.005  # 兜底 ±0.5%
+    trs = []
+    for i in range(1, min(period + 1, len(closes))):
+        tr = max(
+            closes[i] - closes[i - 1],
+            abs(closes[i] - closes[i - 1]),
+            abs(closes[i] - closes[i - 1])
+        )
+        trs.append(tr)
+    atr = sum(trs) / len(trs)
+    return atr / closes[-1]  # 相对波动率
 
 def match_peaks_in_window(price_idx: int, target_indices: np.array, window: int = 3) -> tuple:
     """在 price_idx 附近找最近的 target 峰谷"""
@@ -264,20 +326,26 @@ def detect_divergence(symbol: str, klines: list):
         'kline_idx': int,       # 形态所在K线索引
     }
     """
-    if len(klines) < 50:
+    if len(klines) < 100:
         return None
-    
+
     closes = np.array([k["c"] for k in klines])
     cvd = calc_cvd(klines)
-    
-    # 检测价格峰谷
-    price_peaks, price_valleys = find_peaks_valleys(closes, distance=15, prominence_pct=0.03)
-    # 检测CVD峰谷
-    cvd_peaks, cvd_valleys = find_peaks_valleys(cvd, distance=15, prominence_pct=0.02)
-    
+
+    # 尝试读本地 CVD 缓存（CVD波峰波谷位置，单位：数组索引）
+    cached_peaks, cached_valleys = load_local_cvd_cache(symbol)
+    if len(cached_peaks) >= 5 and len(cached_valleys) >= 5:
+        price_peaks, price_valleys = find_peaks_valleys(closes, distance=15, prominence_pct=0.03)
+        cvd_peaks = cached_peaks
+        cvd_valleys = cached_valleys
+    else:
+        # 无缓存时重新检测价格和CVD峰谷
+        price_peaks, price_valleys = find_peaks_valleys(closes, distance=15, prominence_pct=0.03)
+        cvd_peaks, cvd_valleys = find_peaks_valleys(cvd, distance=15, prominence_pct=0.02)
+
     if len(price_peaks) < 2 or len(cvd_peaks) < 2 or len(price_valleys) < 2 or len(cvd_valleys) < 2:
         return None
-    
+
     result = {
         "symbol": symbol,
         "direction": None,
@@ -294,15 +362,21 @@ def detect_divergence(symbol: str, klines: list):
         "oi_direction": None,    # OI方向: 'rise'(OI增)/'fall'(OI减)/'stable'
         "funding_rate": None,    # 年化资金费率（小数形式）
     }
-    
+
     # 计算 RSI
     rsi = calc_rsi(closes, RSI_PERIOD)
     result["rsi"] = round(rsi, 2)
-    
-    # 转换索引：price_peaks/valleys 是数组索引（从0开始）
-    # 需要配对最新几个峰谷做判断
-    # 取最近的3个价格峰谷
-    
+
+    # ─── 顶背离（做空）：RSI>=65 才有效（避免在超买区域追空）────────
+    # ─── 底背离（做多）：RSI<=35 才有效（避免在超卖区域追多）────────
+    RSI_SHORT_MIN = 65  # 做空最低RSI门槛
+    RSI_LONG_MAX = 35   # 做多最高RSI门槛
+
+    # ATR 波动率归一化 OI 方向阈值（替代硬编码 ±0.5%）
+    atr_pct = calc_atr_threshold(closes)
+    oi_rise_thresh = max(atr_pct, 0.005)   # OI 上涨阈值（取 ATR 相对波动和 0.5% 的较大值）
+    oi_fall_thresh = -max(atr_pct, 0.005)  # OI 下跌阈值
+
     # ─── CVD 领先型背离（价格滞后）──────────────
     # 做多：CVD创新低，但价格没创新低 + 看涨形态
     # 做空：CVD创新高，但价格没创新高 + 看跌形态
@@ -330,41 +404,44 @@ def detect_divergence(symbol: str, klines: list):
             if curr_price >= prev_price_val:
                 pattern = detect_pattern(klines, pv_nearest)
                 if pattern in ["bullish_engulfing", "hammer"]:
-                    entry_price = curr_price
-                    # 止损在前低下方，目标在entry上方（底背离做多）
-                    sl_exact = prev_price_val * 0.98
-                    tp1_exact = entry_price * 1.02
-                    oi_dir = _oi_dir_map.get(symbol, "→OI")
-                    共振标识 = "📈" if oi_dir == "↑OI" else ""
-                    cvd_drop_pct = (curr_cvd_val - prev_cvd_val) / abs(prev_cvd_val) * 100
-                    result["direction"] = "long"
-                    result["divergence_type"] = "cvd_bottom"
-                    result["共振"] = 共振标识
-                    result["reason"] = (f"CVD底背离(领先)：CVD新低 | 价格未新低 | 形态={pattern}{共振标识}")
-                    result["divergence_desc"] = result["reason"]
-                    result["strength"] = 3
-                    result["entry_price"] = round(entry_price, 4)
-                    result["stop_loss"] = round(sl_exact, 4)
-                    result["target1"] = round(tp1_exact, 4)
-                    result["target2"] = round(tp1_exact * 1.02, 4)
-                    # 存精确值用于显示百分比（避免小数值四舍五入失真）
-                    result["_entry_exact"] = entry_price
-                    result["_sl_exact"] = sl_exact
-                    result["_tp1_exact"] = tp1_exact
-                    result["pattern"] = pattern
-                    result["cvd_strength"] = round(abs(cvd_drop_pct), 2)
-                    result["kline_idx"] = pv_nearest
-                    result["price_idx"] = pv_nearest
-                    # 波峰波谷详情（用于展示）
-                    result["_curr_cvd_peak_val"] = round(curr_cvd_val, 2)
-                    result["_prev_cvd_peak_val"] = round(prev_cvd_val, 2)
-                    result["_curr_price_peak_val"] = round(curr_price, 6)
-                    result["_prev_price_peak_val"] = round(prev_price_val, 6)
-                    result["_curr_cvd_peak_idx"] = int(ci)
-                    result["_prev_cvd_peak_idx"] = int(all_cv[-1])
-                    result["_curr_price_peak_idx"] = int(pv_nearest)
-                    result["_prev_price_peak_idx"] = int(prev_pv)
-                    return result
+                    # RSI过滤：超卖才做多
+                    if rsi > RSI_LONG_MAX:
+                        pass  # RSI不在超卖区，跳过但继续找下一个
+                    else:
+                        entry_price = curr_price
+                        # 止损在前低下方，目标在entry上方（底背离做多）
+                        sl_exact = prev_price_val * 0.98
+                        tp1_exact = entry_price * 1.02
+                        oi_dir = _oi_dir_map.get(symbol, "→OI")
+                        共振标识 = "📈" if oi_dir == "↑OI" else ""
+                        cvd_drop_pct = (curr_cvd_val - prev_cvd_val) / abs(prev_cvd_val) * 100
+                        result["direction"] = "long"
+                        result["divergence_type"] = "cvd_bottom"
+                        result["共振"] = 共振标识
+                        result["reason"] = (f"CVD底背离(领先)：CVD新低 | 价格未新低 | 形态={pattern}{共振标识}")
+                        result["divergence_desc"] = result["reason"]
+                        result["strength"] = 3
+                        result["entry_price"] = round(entry_price, 4)
+                        result["stop_loss"] = round(sl_exact, 4)
+                        result["target1"] = round(tp1_exact, 4)
+                        result["target2"] = round(tp1_exact * 1.02, 4)
+                        result["_entry_exact"] = entry_price
+                        result["_sl_exact"] = sl_exact
+                        result["_tp1_exact"] = tp1_exact
+                        result["pattern"] = pattern
+                        result["cvd_strength"] = round(abs(cvd_drop_pct), 2)
+                        result["kline_idx"] = pv_nearest
+                        result["price_idx"] = pv_nearest
+                        # 底背离 8个波峰波谷字段（与顶背离对称）
+                        result["_curr_cvd_peak_val"] = round(curr_cvd_val, 2)
+                        result["_prev_cvd_peak_val"] = round(prev_cvd_val, 2)
+                        result["_curr_price_peak_val"] = round(curr_price, 6)
+                        result["_prev_price_peak_val"] = round(prev_price_val, 6)
+                        result["_curr_cvd_peak_idx"] = int(ci)
+                        result["_prev_cvd_peak_idx"] = int(all_cv[-1])
+                        result["_curr_price_peak_idx"] = int(pv_nearest)
+                        result["_prev_price_peak_idx"] = int(prev_pv)
+                        return result
 
     # CVD历史新高（领先型顶背离）
     if len(cvd_peaks) >= 2:
@@ -389,40 +466,43 @@ def detect_divergence(symbol: str, klines: list):
             if curr_price <= prev_price_val:
                 pattern = detect_pattern(klines, pp_nearest)
                 if pattern in ["bearish_engulfing", "shooting_star"]:
-                    entry_price = curr_price
-                    # 止损在前高上方，目标在前高下方（顶背离做空）
-                    sl_exact = prev_price_val * 1.02
-                    tp1_exact = prev_price_val * 0.98
-                    oi_dir = _oi_dir_map.get(symbol, "→OI")
-                    共振标识 = "📉" if oi_dir == "↓OI" else ""
-                    cvd_rise_pct = (curr_cvd_peak - prev_cvd_peak) / abs(prev_cvd_peak) * 100
-                    result["direction"] = "short"
-                    result["divergence_type"] = "cvd_top"
-                    result["共振"] = 共振标识
-                    result["reason"] = (f"CVD顶背离(领先)：CVD新高 | 价格未新高 | 形态={pattern}{共振标识}")
-                    result["divergence_desc"] = result["reason"]
-                    result["strength"] = 3
-                    result["entry_price"] = round(entry_price, 4)
-                    result["stop_loss"] = round(sl_exact, 4)
-                    result["target1"] = round(tp1_exact, 4)
-                    result["target2"] = round(tp1_exact * 0.98, 4)
-                    result["_entry_exact"] = entry_price
-                    result["_sl_exact"] = sl_exact
-                    result["_tp1_exact"] = tp1_exact
-                    result["pattern"] = pattern
-                    result["cvd_strength"] = round(abs(cvd_rise_pct), 2)
-                    result["kline_idx"] = pp_nearest
-                    result["price_idx"] = pp_nearest
-                    # 波峰波谷详情（用于展示）
-                    result["_curr_cvd_peak_val"] = round(curr_cvd_peak, 2)
-                    result["_prev_cvd_peak_val"] = round(prev_cvd_peak, 2)
-                    result["_curr_price_peak_val"] = round(curr_price, 6)
-                    result["_prev_price_peak_val"] = round(prev_price_val, 6)
-                    result["_curr_cvd_peak_idx"] = int(ci)
-                    result["_prev_cvd_peak_idx"] = int(all_cp[-1])
-                    result["_curr_price_peak_idx"] = int(pp_nearest)
-                    result["_prev_price_peak_idx"] = int(prev_pp)
-                    return result
+                    # RSI过滤：超买才做空
+                    if rsi < RSI_SHORT_MIN:
+                        pass  # RSI不在超买区，跳过但继续找下一个
+                    else:
+                        entry_price = curr_price
+                        # 止损在前高上方，目标在前高下方（顶背离做空）
+                        sl_exact = prev_price_val * 1.02
+                        tp1_exact = prev_price_val * 0.98
+                        oi_dir = _oi_dir_map.get(symbol, "→OI")
+                        共振标识 = "📉" if oi_dir == "↓OI" else ""
+                        cvd_rise_pct = (curr_cvd_peak - prev_cvd_peak) / abs(prev_cvd_peak) * 100
+                        result["direction"] = "short"
+                        result["divergence_type"] = "cvd_top"
+                        result["共振"] = 共振标识
+                        result["reason"] = (f"CVD顶背离(领先)：CVD新高 | 价格未新高 | 形态={pattern}{共振标识}")
+                        result["divergence_desc"] = result["reason"]
+                        result["strength"] = 3
+                        result["entry_price"] = round(entry_price, 4)
+                        result["stop_loss"] = round(sl_exact, 4)
+                        result["target1"] = round(tp1_exact, 4)
+                        result["target2"] = round(tp1_exact * 0.98, 4)
+                        result["_entry_exact"] = entry_price
+                        result["_sl_exact"] = sl_exact
+                        result["_tp1_exact"] = tp1_exact
+                        result["pattern"] = pattern
+                        result["cvd_strength"] = round(abs(cvd_rise_pct), 2)
+                        result["kline_idx"] = pp_nearest
+                        result["price_idx"] = pp_nearest
+                        result["_curr_cvd_peak_val"] = round(curr_cvd_peak, 2)
+                        result["_prev_cvd_peak_val"] = round(prev_cvd_peak, 2)
+                        result["_curr_price_peak_val"] = round(curr_price, 6)
+                        result["_prev_price_peak_val"] = round(prev_price_val, 6)
+                        result["_curr_cvd_peak_idx"] = int(ci)
+                        result["_prev_cvd_peak_idx"] = int(all_cp[-1])
+                        result["_curr_price_peak_idx"] = int(pp_nearest)
+                        result["_prev_price_peak_idx"] = int(prev_pp)
+                        return result
 
     return None
 
@@ -443,19 +523,21 @@ def save_watch_pool(pool: dict):
     with open(pool_file, "w") as f:
         json.dump(pool, f, indent=2, default=str)
 
-def clean_pool(pool: dict) -> dict:
-    """清理过期信号（超过TTL）"""
+def clean_pool(pool: dict) -> tuple:
+    """清理过期信号（超过TTL），返回 (有效池, 过期池)"""
     now = datetime.now()
-    cleaned = {}
+    cleaned, expired = {}, {}
     for sym, sig in pool.items():
         try:
             created = datetime.fromisoformat(sig.get("created_at", "2020-01-01"))
             age_hours = (now - created).total_seconds() / 3600
             if age_hours < SIGNAL_TTL_HOURS:
                 cleaned[sym] = sig
+            else:
+                expired[sym] = sig
         except:
             pass
-    return cleaned
+    return cleaned, expired
 
 # ========== 单币检测 ==========
 _oi_fr_cache = {}
@@ -471,7 +553,7 @@ def check_symbol(symbol: str):
         with open(filepath) as f:
             data = json.load(f)
         klines = data.get("klines", [])
-        if len(klines) < 50:
+        if len(klines) < 100:
             return symbol, None
         
         signal = detect_divergence(symbol, klines)
@@ -493,85 +575,12 @@ def check_symbol(symbol: str):
     except Exception as e:
         return symbol, None
 
-# ========== 格式化信号消息 ==========
-def format_signal_message(sig: dict) -> str:
-    """格式化 Telegram 推送消息"""
-    direction_emoji = "🟢" if sig["direction"] == "long" else "🔴"
-    direction_text = "看涨" if sig["direction"] == "long" else "看跌"
-    
-    tp1_pct = (sig["target1"] - sig["entry_price"]) / sig["entry_price"] * 100
-    tp2_pct = (sig["target2"] - sig["entry_price"]) / sig["entry_price"] * 100
-    sl_pct = (sig["entry_price"] - sig["stop_loss"]) / sig["entry_price"] * 100
-    
-    if sig["direction"] == "short":
-        tp1_pct = (sig["entry_price"] - sig["target1"]) / sig["entry_price"] * 100
-        tp2_pct = (sig["entry_price"] - sig["target2"]) / sig["entry_price"] * 100
-        sl_pct = (sig["stop_loss"] - sig["entry_price"]) / sig["entry_price"] * 100
-    
-    # OI 方向 + Funding Rate
-    oi_display = sig.get("oi_direction", "→OI")
-    fr_val = sig.get("funding_rate")
-    fr_display = f"{fr_val*100:.4f}%" if fr_val is not None else "N/A"
-    
-    msg = (
-        f"{direction_emoji} *{sig['symbol']}* {direction_text}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 背离：CVD{'底背离' if sig['direction']=='long' else '顶背离'}\n"
-        f"📈 RSI：{sig['rsi']}\n"
-        f"📋 形态：{sig['pattern']}\n"
-        f"💰 OI：{oi_display}（↑持仓增 ↓持仓减 →稳定）\n"
-        f"💸 资金费：{fr_display}\n"
-        f"\n"
-        f"入场 {sig['entry_price']} | 止损 {sig['stop_loss']} (-{sl_pct:.1f}%)\n"
-        f"目标1 {sig['target1']} (+{tp1_pct:.1f}%) | 目标2 {sig['target2']} (+{tp2_pct:.1f}%)\n"
-        f"\n"
-        f"📝 {sig['reason']}\n"
-        f"🕐 {sig.get('created_at', datetime.now().isoformat())}"
-    )
-    return msg
-
-# ========== 批量推送 ==========
-def fmt_signal(sig: dict) -> str:
-    emoji = "🟢" if sig["direction"] == "long" else "🔴"
-    sym = sig["symbol"]
-    rsi = sig["rsi"]
-    div = "顶📉CVD" if sig.get("divergence_type") == "cvd_top" else "底📈CVD" if sig.get("divergence_type") == "cvd_bottom" else "背离"
-    div_tag = ""
-    共振 = sig.get("共振", "")  # OI共振标识：📈或📉
-    oi_arrow = sig.get("oi_direction", "→OI")
-    oi_display = oi_arrow[0] if oi_arrow else "→"
-    tp1_pct = (sig["target1"] - sig["entry_price"]) / sig["entry_price"] * 100
-    sl_pct = (sig["entry_price"] - sig["stop_loss"]) / sig["entry_price"] * 100
-    if sig["direction"] == "short":
-        tp1_pct = (sig["entry_price"] - sig["target1"]) / sig["entry_price"] * 100
-        sl_pct = (sig["stop_loss"] - sig["entry_price"]) / sig["entry_price"] * 100
-    共振 = sig.get("共振", "")
-    div_desc = sig.get("divergence_desc", "")
-    extra_lines = f"\n📊 {div_desc}" if div_desc else ""
-    tp_str = f"目+{abs(tp1_pct):.1f}%({sig['target1']})"
-    return (f"{emoji} *{sym}* | {div}{div_tag} | {共振} | OI{oi_display} | "
-            f"入{sig['entry_price']} {sl_str} {tp_str}{extra_lines}")
-
-def batch_send(signals: list, label: str = ""):
-    if not signals:
-        return
-    total = len(signals)
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        for i in range(0, total, BATCH_SIZE):
-            batch = signals[i:i+BATCH_SIZE]
-            lines = [fmt_signal(s) for s in batch]
-            header = (f"📊 *观察池{label}* | {datetime.now().strftime('%m-%d %H:%M')} | "
-                     f"{total}信号" + (f" ({i+1}-{i+len(batch)})" if total > BATCH_SIZE else ""))
-            msg = header + "\n" + "\n".join(lines)
-            future = executor.submit(send_telegram, msg)
-            ok = future.result()
-            print(f"  批次 {i//BATCH_SIZE+1}: {len(batch)}信号 {'✅' if ok else '❌'}")
-            time.sleep(0.5)
+# 推送统一由 push_pool.py 负责，本文件只负责检测和写入信号池
 
 # ========== 主流程 ==========
 def main():
     print(f"[{datetime.now()}] 开始背离检测")
-    
+
     # 加载 OI/FR 缓存（FR 用）
     global _oi_fr_cache
     _oi_fr_cache = load_oi_fr_cache()
@@ -582,42 +591,127 @@ def main():
              if f.endswith(".json") and not f.startswith(".")]
     print(f"  检测 {len(files)} 个交易对")
 
+    # 预计算所有币的 ATR 波动率阈值（用于 OI 方向判断）
+    atr_thresh = {}
+    for sym in files:
+        fp = f"{KLINES_DIR}/{sym}.json"
+        if os.path.exists(fp):
+            try:
+                with open(fp) as f:
+                    data = json.load(f)
+                klines = data.get("klines", [])
+                if len(klines) >= 20:
+                    closes = np.array([k["c"] for k in klines])
+                    atr_thresh[sym] = calc_atr_threshold(closes)
+            except Exception:
+                pass
+    print(f"  ATR 阈值: {len(atr_thresh)} 个币")
+
     # 查 InfluxDB OI 方向（最近 3h）
     global _oi_dir_map
-    _oi_dir_map = fetch_oi_direction_from_influx(files)
+    _oi_dir_map = fetch_oi_direction_from_influx(files, atr_thresh)
     print(f"  OI 方向: {len(_oi_dir_map)} 个币有数据")
 
-    # 加载现有信号池
+    # 加载现有信号池（并追踪过期信号的结果）
     pool = load_watch_pool()
-    pool = clean_pool(pool)
+    pool, expired = clean_pool(pool)
+
+    # 加载 outcomes 历史
+    outcomes_file = f"{KLINES_DIR}/.outcomes.json"
+    outcomes = {}
+    if os.path.exists(outcomes_file):
+        try:
+            with open(outcomes_file) as f:
+                outcomes = json.load(f)
+        except Exception:
+            pass
+
+    # 追踪过期信号的命中结果
+    for sym, sig in expired.items():
+        if sym in outcomes:
+            continue  # 已记录过
+        try:
+            entry = sig.get("_entry_exact", sig.get("entry_price"))
+            sl = sig.get("_sl_exact", sig.get("stop_loss"))
+            direction = sig.get("direction")
+            with open(f"{KLINES_DIR}/{sym}.json") as f:
+                klines = json.load(f).get("klines", [])
+            if not klines:
+                continue
+            latest_price = klines[-1]["c"]
+            hit = None
+            if direction == "long":
+                if latest_price <= sl:
+                    hit = "sl"   # 止损
+                elif latest_price >= sig.get("_tp1_exact", sig.get("target1")):
+                    hit = "tp"   # 止盈
+                else:
+                    hit = "open"
+            elif direction == "short":
+                if latest_price >= sl:
+                    hit = "sl"
+                elif latest_price <= sig.get("_tp1_exact", sig.get("target1")):
+                    hit = "tp"
+                else:
+                    hit = "open"
+            outcomes[sym] = {"hit": hit, "entry": entry, "exit": latest_price,
+                             "direction": direction, "expired_at": datetime.now().isoformat()}
+        except Exception:
+            pass
+
+    with open(outcomes_file, "w") as f:
+        json.dump(outcomes, f, indent=2, default=str)
 
     new_signals = []
     start = time.time()
-    
+
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(check_symbol, sym): sym for sym in files}
-        
+
         for i, future in enumerate(as_completed(futures), 1):
             sym, signal = future.result()
             if signal and signal.get("direction"):
                 signal["created_at"] = datetime.now().isoformat()
                 pool[sym] = signal
                 new_signals.append(signal)
-            
+
             if i % 100 == 0 or i == len(files):
                 print(f"  进度 {i}/{len(files)}")
-    
+
     # 保存信号池
     save_watch_pool(pool)
-    
+
     elapsed = time.time() - start
     print(f"\n[{datetime.now()}] 完成，耗时 {elapsed:.1f}s")
     print(f"当前池信号数: {len(pool)} | 新增: {len(new_signals)}")
 
+    # 自动写入 .status.json
+    status = {
+        "generated_at": datetime.now().isoformat(),
+        "kline_files": len(files),
+        "pool_signals": len(pool),
+        "pool_long": sum(1 for s in pool.values() if s.get("direction") == "long"),
+        "pool_short": sum(1 for s in pool.values() if s.get("direction") == "short"),
+        "new_signals_this_run": len(new_signals),
+        "cvd_peaks_cache": len([f for f in os.listdir(KLINES_DIR) if f.startswith(".cvd_peaks_")]),
+        "cvd_valleys_cache": len([f for f in os.listdir(KLINES_DIR) if f.startswith(".cvd_valleys_")]),
+        "latest_fetch": datetime.now().isoformat(),
+        "cron_jobs": [
+            "klines_fetch :00",
+            "cvd_calc :06",
+            "oi_fr_fetch :12",
+            "kline_peaks_calc :18",
+            "divergence_check :20"
+        ]
+    }
+    with open(f"{KLINES_DIR}/.status.json", "w") as f:
+        json.dump(status, f, indent=2)
+    print(f"  .status.json 已更新")
+
     # 完整扫描后推送一次（不管有没有新信号）
     from subprocess import run
     run(["python3", f"{KLINES_DIR}/push_pool.py", "--force"], check=False)
-    
+
     # 也输出当前池所有信号摘要
     if pool:
         print(f"\n=== 当前观察池 ({len(pool)} 个信号) ===")

@@ -58,13 +58,16 @@ def load_local_events(symbol: str, event_type: str):
     cache_file = f"{KLINES_DIR}/.kline_{event_type}_{symbol}.json"
     if os.path.exists(cache_file):
         with open(cache_file) as f:
-            return set(json.load(f))
+            raw = json.load(f)
+            if isinstance(raw, list):
+                return set(raw)
     return set()
 
-def save_local_events(symbol: str, event_type: str, times: list):
+def save_local_events(symbol: str, event_type: str, times: set):
+    """保存时排序，保证增量检测正确"""
     cache_file = f"{KLINES_DIR}/.kline_{event_type}_{symbol}.json"
     with open(cache_file, "w") as f:
-        json.dump(list(times), f)
+        json.dump(sorted(list(times)), f)
 
 # ========== 单币处理 ==========
 def process_symbol(symbol: str):
@@ -118,15 +121,30 @@ def process_symbol(symbol: str):
     if lines:
         ok = write_influx(lines)
         if ok:
-            save_local_events(symbol, "peak", local_peaks)
-            save_local_events(symbol, "valley", local_valleys)
-        return symbol, new_peak, new_valley, None
-    
+            return symbol, new_peak, new_valley, None
+        # InfluxDB失败：缓存已保存，防止重复检测
+        return symbol, new_peak, new_valley, "InfluxDB写入失败"
+
+    # 无新数据：确保缓存文件存在（避免每次都重新全量计算）
+    if not os.path.exists(f"{KLINES_DIR}/.kline_peak_{symbol}.json"):
+        save_local_events(symbol, "peak", local_peaks)
+    if not os.path.exists(f"{KLINES_DIR}/.kline_valley_{symbol}.json"):
+        save_local_events(symbol, "valley", local_valleys)
+
     return symbol, 0, 0, None
 
 # ========== 主流程 ==========
+def _is_kline_file(fname: str) -> bool:
+    if fname.endswith(".json"):
+        for prefix in (".cvd_peaks_", ".cvd_valleys_", ".kline_peak_", ".kline_valley_",
+                       ".watch_pool", ".push_state", ".oi_fr_cache", ".status"):
+            if fname.startswith(prefix):
+                return False
+        return True
+    return False
+
 def main():
-    files = [f[:-5] for f in os.listdir(KLINES_DIR) if f.endswith(".json") and not f.startswith(".")]
+    files = [f[:-5] for f in os.listdir(KLINES_DIR) if _is_kline_file(f)]
     print(f"[{datetime.now()}] K线波峰波谷计算，共 {len(files)} 个交易对")
     
     results = {"ok": 0, "skip": 0, "fail": 0, "failed": []}
