@@ -11,7 +11,14 @@ import json
 import time
 import random
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+
+BJ_TZ = timezone(timedelta(hours=8))
+
+def now_bj():
+    """返回北京时间（UTC+8）"""
+    return datetime.now(BJ_TZ)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 PROXY = "http://ayniaiwoqi:***@192.147.179.236:51523"
@@ -125,7 +132,7 @@ def update_symbol(symbol):
                     "interval": "1h",
                     "klines": merged,
                     "count": len(merged),
-                    "fetched_at": datetime.now().isoformat()
+                    "fetched_at": now_bj().isoformat()
                 }, f)
             return symbol, len(new_klines), None
         else:
@@ -142,7 +149,7 @@ def update_symbol(symbol):
                     "interval": "1h",
                     "klines": klines,
                     "count": len(klines),
-                    "fetched_at": datetime.now().isoformat()
+                    "fetched_at": now_bj().isoformat()
                 }, f)
             return symbol, len(klines), None
         else:
@@ -152,7 +159,7 @@ def main():
     # 每小时以分钟为种子，同一小时内顺序固定
     random.seed(int(time.time() // 60))
     symbols = get_trading_symbols()
-    print(f"[{datetime.now()}] 开始拉取 {len(symbols)} 个交易对")
+    print(f"[{now_bj()}] 开始拉取 {len(symbols)} 个交易对")
 
     results = {"success": 0, "fail": 0, "no_update": 0, "failed": []}
     rate_limited = 0
@@ -181,7 +188,7 @@ def main():
                 print(f"进度 {i}/{len(symbols)} | 新增 {results['success']} | 无更新 {results['no_update']} | 失败 {results['fail']} | {elapsed:.1f}s")
 
     elapsed = time.time() - start
-    print(f"\n[{datetime.now()}] 完成，耗时 {elapsed:.1f}s")
+    print(f"\n[{now_bj()}] 完成，耗时 {elapsed:.1f}s")
     print(f"新增K线: {results['success']} | 无更新: {results['no_update']} | 失败: {results['fail']} | 限流429: {rate_limited}")
     if results["failed"]:
         print(f"失败: {results['failed'][:5]}")

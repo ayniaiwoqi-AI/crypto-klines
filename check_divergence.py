@@ -12,7 +12,14 @@ import time
 import math
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+
+BJ_TZ = timezone(timedelta(hours=8))
+
+def now_bj():
+    """返回北京时间（UTC+8）"""
+    return datetime.now(BJ_TZ)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy.signal import find_peaks
 import talib
@@ -72,7 +79,7 @@ def load_oi_fr_cache() -> dict:
     except Exception:
         return {}
 
-    now = datetime.now()
+    now = now_bj()
     stale_count = 0
     for sym, data in raw.items():
         updated_str = data.get("updated", "")
@@ -587,7 +594,7 @@ def save_watch_pool(pool: dict):
 
 def clean_pool(pool: dict) -> tuple:
     """清理过期信号（超过TTL），返回 (有效池, 过期池)"""
-    now = datetime.now()
+    now = now_bj()
     cleaned, expired = {}, {}
     for sym, sig in pool.items():
         try:
@@ -641,7 +648,7 @@ def check_symbol(symbol: str):
 
 # ========== 主流程 ==========
 def main():
-    print(f"[{datetime.now()}] 开始背离检测")
+    print(f"[{now_bj()}] 开始背离检测")
 
     # 加载 OI/FR 缓存（FR 用）
     global _oi_fr_cache
@@ -717,7 +724,7 @@ def main():
                 else:
                     hit = "open"
             outcomes[sym] = {"hit": hit, "entry": entry, "exit": latest_price,
-                             "direction": direction, "expired_at": datetime.now().isoformat()}
+                             "direction": direction, "expired_at": now_bj().isoformat()}
         except Exception:
             pass
 
@@ -733,7 +740,7 @@ def main():
         for i, future in enumerate(as_completed(futures), 1):
             sym, signal = future.result()
             if signal and signal.get("direction"):
-                signal["created_at"] = datetime.now().isoformat()
+                signal["created_at"] = now_bj().isoformat()
                 pool[sym] = signal
                 new_signals.append(signal)
 
@@ -744,12 +751,12 @@ def main():
     save_watch_pool(pool)
 
     elapsed = time.time() - start
-    print(f"\n[{datetime.now()}] 完成，耗时 {elapsed:.1f}s")
+    print(f"\n[{now_bj()}] 完成，耗时 {elapsed:.1f}s")
     print(f"当前池信号数: {len(pool)} | 新增: {len(new_signals)}")
 
     # 自动写入 .status.json
     status = {
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": now_bj().isoformat(),
         "kline_files": len(files),
         "pool_signals": len(pool),
         "pool_long": sum(1 for s in pool.values() if s.get("direction") == "long"),
@@ -757,7 +764,7 @@ def main():
         "new_signals_this_run": len(new_signals),
         "cvd_peaks_cache": len([f for f in os.listdir(KLINES_DIR) if f.startswith(".cvd_peaks_")]),
         "cvd_valleys_cache": len([f for f in os.listdir(KLINES_DIR) if f.startswith(".cvd_valleys_")]),
-        "latest_fetch": datetime.now().isoformat(),
+        "latest_fetch": now_bj().isoformat(),
         "cron_jobs": [
             "klines_fetch :00",
             "cvd_calc :06",

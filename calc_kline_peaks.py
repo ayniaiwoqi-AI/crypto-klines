@@ -11,7 +11,14 @@ import os
 import time
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+
+BJ_TZ = timezone(timedelta(hours=8))
+
+def now_bj():
+    """返回北京时间（UTC+8）"""
+    return datetime.now(BJ_TZ)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy.signal import find_peaks
 
@@ -145,7 +152,7 @@ def _is_kline_file(fname: str) -> bool:
 
 def main():
     files = [f[:-5] for f in os.listdir(KLINES_DIR) if _is_kline_file(f)]
-    print(f"[{datetime.now()}] K线波峰波谷计算，共 {len(files)} 个交易对")
+    print(f"[{now_bj()}] K线波峰波谷计算，共 {len(files)} 个交易对")
     
     results = {"ok": 0, "skip": 0, "fail": 0, "failed": []}
     start = time.time()
@@ -168,7 +175,7 @@ def main():
                 print(f"进度 {i}/{len(files)} | 新增 {results['ok']} | 无更新 {results['skip']} | 失败 {results['fail']} | {elapsed:.1f}s")
     
     elapsed = time.time() - start
-    print(f"\n[{datetime.now()}] 完成，耗时 {elapsed:.1f}s")
+    print(f"\n[{now_bj()}] 完成，耗时 {elapsed:.1f}s")
     print(f"新增事件: {results['ok']} | 无更新: {results['skip']} | 失败: {results['fail']}")
     if results["failed"]:
         print(f"失败: {results['failed'][:5]}")

@@ -10,7 +10,14 @@ import os
 import time
 import hashlib
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+
+BJ_TZ = timezone(timedelta(hours=8))
+
+def now_bj():
+    """返回北京时间（UTC+8）"""
+    return datetime.now(BJ_TZ)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 KLINES_DIR = "/root/crypto_klines"
@@ -47,7 +54,7 @@ def load_pool():
     return {}
 
 def clean_pool(pool):
-    now = datetime.now()
+    now = now_bj()
     cleaned = {}
     for sym, sig in pool.items():
         try:
@@ -155,7 +162,7 @@ def batch_send(signals: list, label: str = ""):
                 if j > 0:
                     lines.append("━━━━━━━━")
                 lines.append(fmt_signal(s))
-            header = (f"📊 *观察池{label}* | {datetime.now().strftime('%m-%d %H:%M')} | "
+            header = (f"📊 *观察池{label}* | {now_bj().strftime('%m-%d %H:%M')} | "
                      f"{total}信号" + (f" ({i+1}-{i+len(batch)})" if total > BATCH_SIZE else ""))
             msg = header + "\n" + "\n".join(lines)
             future = executor.submit(send_telegram, msg)
@@ -175,26 +182,26 @@ def push_pool(force: bool = False, label: str = ""):
     pool = clean_pool(pool)
 
     if not pool:
-        print(f"[{datetime.now()}] 观察池为空，跳过")
+        print(f"[{now_bj()}] 观察池为空，跳过")
         return False
 
     state = load_state()
     current_hash = pool_hash(pool)
 
     if not force and current_hash == state.get("hash"):
-        print(f"[{datetime.now()}] 池无变化，跳过推送 (hash={current_hash})")
+        print(f"[{now_bj()}] 池无变化，跳过推送 (hash={current_hash})")
         return False
 
     long_signals = [s for s in pool.values() if s.get("direction") == "long"]
     short_signals = [s for s in pool.values() if s.get("direction") == "short"]
     label = label or "全量"
-    print(f"[{datetime.now()}] 推送 {len(pool)} 信号 | 🟢{len(long_signals)} 🔴{len(short_signals)}")
+    print(f"[{now_bj()}] 推送 {len(pool)} 信号 | 🟢{len(long_signals)} 🔴{len(short_signals)}")
 
     all_signals = sorted(pool.values(), key=lambda x: x["symbol"])
     ok = batch_send(all_signals, label)
 
     if ok:
-        save_state({"hash": current_hash, "last_push": datetime.now().isoformat()})
+        save_state({"hash": current_hash, "last_push": now_bj().isoformat()})
 
     return ok
 

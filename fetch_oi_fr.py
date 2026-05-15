@@ -12,7 +12,14 @@ import json
 import time
 import random
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+
+BJ_TZ = timezone(timedelta(hours=8))
+
+def now_bj():
+    """返回北京时间（UTC+8）"""
+    return datetime.now(BJ_TZ)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 PROXY = "http://ayniaiwoqi:***@192.147.179.236:51523"
@@ -140,7 +147,7 @@ def save_cache(oi_results: dict, fr_results: dict):
         except Exception:
             pass
 
-    now = datetime.now()
+    now = now_bj()
     cache = {}
     for sym in set(list(oi_results.keys()) + list(fr_results.keys())):
         old_oi = prev_cache.get(sym, {}).get("oi")
@@ -166,7 +173,7 @@ def load_cache_with_ttl():
     except Exception:
         return {}
 
-    now = datetime.now()
+    now = now_bj()
     fresh_cache = {}
     stale_count = 0
     for sym, data in raw.items():
@@ -216,7 +223,7 @@ def fetch_all(symbols: list, fetch_fn, max_workers: int, label: str):
 def main():
     # 用时间种子打乱，每次运行顺序不同
     random.seed(int(time.time() // 60))  # 每分钟种子相同，小时内顺序固定但小时间不同
-    print(f"[{datetime.now()}] 开始采集 OI + Funding Rate")
+    print(f"[{now_bj()}] 开始采集 OI + Funding Rate")
 
     symbols = get_trading_symbols()
     if not symbols:
@@ -249,7 +256,7 @@ def main():
 
     save_cache(oi_results, fr_results)
 
-    print(f"[{datetime.now()}] 完成 | OI: {'OK' if oi_ok else 'FAIL'} ({len(oi_lines)}条) | FR: {'OK' if fr_ok else 'FAIL'} ({len(fr_lines)}条)")
+    print(f"[{now_bj()}] 完成 | OI: {'OK' if oi_ok else 'FAIL'} ({len(oi_lines)}条) | FR: {'OK' if fr_ok else 'FAIL'} ({len(fr_lines)}条)")
 
     for sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]:
         oi = oi_results.get(sym)
