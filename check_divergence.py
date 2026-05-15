@@ -54,24 +54,11 @@ def send_telegram(msg: str):
         return False
 
 def calc_rsi(closes: np.array, period: int = 14) -> float:
-    """计算 RSI（Wilder 平滑，与 TradingView/Binance 一致）"""
+    """计算 RSI（TA-Lib 实现，Wilder 平滑，与 TradingView/Binance 一致）"""
     if len(closes) < period + 1:
         return 50.0
-    deltas = np.diff(closes[-period-1:])
-    gains = np.where(deltas > 0, deltas, 0.0)
-    losses = np.where(deltas < 0, -deltas, 0.0)
-
-    # Wilder 指数平滑
-    avg_gain = gains[0]
-    avg_loss = losses[0]
-    for i in range(1, len(deltas)):
-        avg_gain = avg_gain * (period - 1) / period + gains[i] / period
-        avg_loss = avg_loss * (period - 1) / period + losses[i] / period
-
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    rsi_arr = talib.RSI(closes.astype(np.float64), timeperiod=period)
+    return float(rsi_arr[-1])
 
 CACHE_TTL_HOURS = 2  # 缓存超过2小时视为过期
 
