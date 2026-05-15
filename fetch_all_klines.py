@@ -21,7 +21,12 @@ def now_bj():
     return datetime.now(BJ_TZ)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-PROXY = "http://ayniaiwoqi:***@192.147.179.236:51523"
+# 代理从环境变量读取，不硬编码
+_proxy_user = os.getenv("PROXY_USER", "ayniaiwoqi")
+_proxy_pass = os.getenv("PROXY_PASS", "")
+_proxy_host = os.getenv("PROXY_HOST", "192.147.179.236")
+_proxy_port = os.getenv("PROXY_PORT", "51523")
+PROXY = f"http://{_proxy_user}:{_proxy_pass}@{_proxy_host}:{_proxy_port}"
 STABLECOINS = {"usdt","usdc","busd","dai","usdd","usdp","tusd","frax","husd","ousd","mim","ust","ustc","lusd"}
 LIMIT = 1000
 TARGET_K = 987  # 固定987根K线
