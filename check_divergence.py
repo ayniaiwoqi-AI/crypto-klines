@@ -245,12 +245,12 @@ def calc_cvd_lead_bars(cvd: np.array, cvd_peaks_or_valleys: np.array,
     return 0  # 占位，由调用处传入实际差值
 
 def cvd_momentum_filter(cvd: np.array, direction: str,
-                        min_roc_pct: float = 5.0) -> tuple:
+                        min_roc_pct: float = 3.0) -> tuple:
     """
     P0 过滤：CVD 动量不足则跳过
     direction: 'short'(做空) 或 'long'(做多)
-    做空：需要 CVD 最近20周期上涨 >5%（看空动能充足）
-    做多：需要 CVD 最近20周期下跌 >5%（买入动能充足）
+    做空：需要 CVD 最近20周期上涨 >3%（看空动能充足）
+    做多：需要 CVD 最近20周期下跌 >3%（买入动能充足）
     返回 (通过: bool, roc: float, reason: str)
     """
     roc = calc_cvd_roc(cvd, period=20)
@@ -412,8 +412,8 @@ def detect_divergence(symbol: str, klines: list):
 
     # ─── 顶背离（做空）：RSI>=65 才有效（避免在超买区域追空）────────
     # ─── 底背离（做多）：RSI<=35 才有效（避免在超卖区域追多）────────
-    RSI_SHORT_MIN = 65  # 做空最低RSI门槛
-    RSI_LONG_MAX = 35   # 做多最高RSI门槛
+    RSI_SHORT_MIN = 58  # 做空最低RSI门槛（放宽，RSI≥58才考虑做空）
+    RSI_LONG_MAX = 42   # 做多最高RSI门槛（放宽，RSI≤42才考虑做多）
 
     # ATR 波动率归一化 OI 方向阈值（替代硬编码 ±0.5%）
     atr_pct = calc_atr_threshold(closes)
@@ -449,57 +449,57 @@ def detect_divergence(symbol: str, klines: list):
             prev_price_val = closes[prev_pv]
             if curr_price >= prev_price_val:
                 pattern = detect_pattern(klines, pv_nearest)
-                if pattern in ["bullish_engulfing", "hammer"]:
-                    # RSI过滤：超卖才做多
-                    if rsi > RSI_LONG_MAX:
-                        pass  # RSI不在超卖区，跳过但继续找下一个
-                    else:
-                        # P0: CVD 动量过滤
-                        passed_roc, roc_val, roc_reason = cvd_momentum_filter(cvd, "long")
-                        if not passed_roc:
-                            # 动量不足，降权继续（strength-1 不跳过）
-                            pass
-                        # P1: 趋势结构降权
-                        trend_adj = cvd_trend_filter(trend_structure, "long")
-                        entry_price = curr_price
-                        # 止损在前低下方，目标在entry上方（底背离做多）
-                        sl_exact = prev_price_val * 0.98
-                        tp1_exact = entry_price * 1.02
-                        oi_dir = _oi_dir_map.get(symbol, "→OI")
-                        共振标识 = "📈" if oi_dir == "↑OI" else ""
-                        cvd_drop_pct = (curr_cvd_val - prev_cvd_val) / abs(prev_cvd_val) * 100
-                        base_strength = 3
-                        final_strength = max(1, base_strength + trend_adj)
-                        result["direction"] = "long"
-                        result["divergence_type"] = "cvd_bottom"
-                        result["共振"] = 共振标识
-                        result["reason"] = (f"CVD底背离(领先)：CVD新低 | 价格未新低 | 形态={pattern}{共振标识}")
-                        result["divergence_desc"] = result["reason"]
-                        result["strength"] = final_strength
-                        result["entry_price"] = round(entry_price, 4)
-                        result["stop_loss"] = round(sl_exact, 4)
-                        result["target1"] = round(tp1_exact, 4)
-                        result["target2"] = round(tp1_exact * 1.02, 4)
-                        result["_entry_exact"] = entry_price
-                        result["_sl_exact"] = sl_exact
-                        result["_tp1_exact"] = tp1_exact
-                        result["pattern"] = pattern
-                        result["cvd_strength"] = round(abs(cvd_drop_pct), 2)
-                        result["kline_idx"] = pv_nearest
-                        result["price_idx"] = pv_nearest
-                        # 底背离 8个波峰波谷字段（与顶背离对称）
-                        result["_curr_cvd_peak_val"] = round(curr_cvd_val, 2)
-                        result["_prev_cvd_peak_val"] = round(prev_cvd_val, 2)
-                        result["_curr_price_peak_val"] = round(curr_price, 6)
-                        result["_prev_price_peak_val"] = round(prev_price_val, 6)
-                        result["_curr_cvd_peak_idx"] = int(ci)
-                        result["_prev_cvd_peak_idx"] = int(all_cv[-1])
-                        result["_curr_price_peak_idx"] = int(pv_nearest)
-                        result["_prev_price_peak_idx"] = int(prev_pv)
-                        # P0/P1 新增字段
-                        result["_cvd_roc"] = round(roc_val, 2)
-                        result["_cvd_trend"] = trend_structure
-                        return result
+                # RSI过滤：RSI≤42才考虑做多
+                if rsi > RSI_LONG_MAX:
+                    pass  # RSI不在超卖区，跳过但继续找下一个
+                else:
+                    # P0: CVD 动量过滤
+                    passed_roc, roc_val, roc_reason = cvd_momentum_filter(cvd, "long")
+                    if not passed_roc:
+                        # 动量不足，降权继续（strength-1 不跳过）
+                        pass
+                    # P1: 趋势结构降权
+                    trend_adj = cvd_trend_filter(trend_structure, "long")
+                    entry_price = curr_price
+                    # 止损在前低下方，目标在entry上方（底背离做多）
+                    sl_exact = prev_price_val * 0.98
+                    tp1_exact = entry_price * 1.02
+                    oi_dir = _oi_dir_map.get(symbol, "→OI")
+                    共振标识 = "📈" if oi_dir == "↑OI" else ""
+                    cvd_drop_pct = (curr_cvd_val - prev_cvd_val) / abs(prev_cvd_val) * 100
+                    base_strength = 3
+                    final_strength = max(1, base_strength + trend_adj)
+                    result["direction"] = "long"
+                    result["divergence_type"] = "cvd_bottom"
+                    result["共振"] = 共振标识
+                    pattern_tag = f"|形态={pattern}" if pattern in ["bullish_engulfing", "hammer"] else ""
+                    result["reason"] = (f"CVD底背离(领先)：CVD新低 | 价格未新低{pattern_tag}{共振标识}")
+                    result["divergence_desc"] = result["reason"]
+                    result["strength"] = final_strength
+                    result["entry_price"] = round(entry_price, 4)
+                    result["stop_loss"] = round(sl_exact, 4)
+                    result["target1"] = round(tp1_exact, 4)
+                    result["target2"] = round(tp1_exact * 1.02, 4)
+                    result["_entry_exact"] = entry_price
+                    result["_sl_exact"] = sl_exact
+                    result["_tp1_exact"] = tp1_exact
+                    result["pattern"] = pattern
+                    result["cvd_strength"] = round(abs(cvd_drop_pct), 2)
+                    result["kline_idx"] = pv_nearest
+                    result["price_idx"] = pv_nearest
+                    # 底背离 8个波峰波谷字段（与顶背离对称）
+                    result["_curr_cvd_peak_val"] = round(curr_cvd_val, 2)
+                    result["_prev_cvd_peak_val"] = round(prev_cvd_val, 2)
+                    result["_curr_price_peak_val"] = round(curr_price, 6)
+                    result["_prev_price_peak_val"] = round(prev_price_val, 6)
+                    result["_curr_cvd_peak_idx"] = int(ci)
+                    result["_prev_cvd_peak_idx"] = int(all_cv[-1])
+                    result["_curr_price_peak_idx"] = int(pv_nearest)
+                    result["_prev_price_peak_idx"] = int(prev_pv)
+                    # P0/P1 新增字段
+                    result["_cvd_roc"] = round(roc_val, 2)
+                    result["_cvd_trend"] = trend_structure
+                    return result
 
     # CVD历史新高（领先型顶背离）
     if len(cvd_peaks) >= 2:
@@ -523,55 +523,55 @@ def detect_divergence(symbol: str, klines: list):
             prev_price_val = closes[prev_pp]
             if curr_price <= prev_price_val:
                 pattern = detect_pattern(klines, pp_nearest)
-                if pattern in ["bearish_engulfing", "shooting_star"]:
-                    # RSI过滤：超买才做空
-                    if rsi < RSI_SHORT_MIN:
-                        pass  # RSI不在超买区，跳过但继续找下一个
-                    else:
-                        # P0: CVD 动量过滤
-                        passed_roc, roc_val, roc_reason = cvd_momentum_filter(cvd, "short")
-                        if not passed_roc:
-                            pass
-                        # P1: 趋势结构降权
-                        trend_adj = cvd_trend_filter(trend_structure, "short")
-                        entry_price = curr_price
-                        # 止损在前高上方，目标在前高下方（顶背离做空）
-                        sl_exact = prev_price_val * 1.02
-                        tp1_exact = prev_price_val * 0.98
-                        oi_dir = _oi_dir_map.get(symbol, "→OI")
-                        共振标识 = "📉" if oi_dir == "↓OI" else ""
-                        cvd_rise_pct = (curr_cvd_peak - prev_cvd_peak) / abs(prev_cvd_peak) * 100
-                        base_strength = 3
-                        final_strength = max(1, base_strength + trend_adj)
-                        result["direction"] = "short"
-                        result["divergence_type"] = "cvd_top"
-                        result["共振"] = 共振标识
-                        result["reason"] = (f"CVD顶背离(领先)：CVD新高 | 价格未新高 | 形态={pattern}{共振标识}")
-                        result["divergence_desc"] = result["reason"]
-                        result["strength"] = final_strength
-                        result["entry_price"] = round(entry_price, 4)
-                        result["stop_loss"] = round(sl_exact, 4)
-                        result["target1"] = round(tp1_exact, 4)
-                        result["target2"] = round(tp1_exact * 0.98, 4)
-                        result["_entry_exact"] = entry_price
-                        result["_sl_exact"] = sl_exact
-                        result["_tp1_exact"] = tp1_exact
-                        result["pattern"] = pattern
-                        result["cvd_strength"] = round(abs(cvd_rise_pct), 2)
-                        result["kline_idx"] = pp_nearest
-                        result["price_idx"] = pp_nearest
-                        result["_curr_cvd_peak_val"] = round(curr_cvd_peak, 2)
-                        result["_prev_cvd_peak_val"] = round(prev_cvd_peak, 2)
-                        result["_curr_price_peak_val"] = round(curr_price, 6)
-                        result["_prev_price_peak_val"] = round(prev_price_val, 6)
-                        result["_curr_cvd_peak_idx"] = int(ci)
-                        result["_prev_cvd_peak_idx"] = int(all_cp[-1])
-                        result["_curr_price_peak_idx"] = int(pp_nearest)
-                        result["_prev_price_peak_idx"] = int(prev_pp)
-                        # P0/P1 新增字段
-                        result["_cvd_roc"] = round(roc_val, 2)
-                        result["_cvd_trend"] = trend_structure
-                        return result
+                # RSI过滤：RSI≥58才考虑做空
+                if rsi < RSI_SHORT_MIN:
+                    pass  # RSI不在超买区，跳过但继续找下一个
+                else:
+                    # P0: CVD 动量过滤
+                    passed_roc, roc_val, roc_reason = cvd_momentum_filter(cvd, "short")
+                    if not passed_roc:
+                        pass
+                    # P1: 趋势结构降权
+                    trend_adj = cvd_trend_filter(trend_structure, "short")
+                    entry_price = curr_price
+                    # 止损在前高上方，目标在前高下方（顶背离做空）
+                    sl_exact = prev_price_val * 1.02
+                    tp1_exact = prev_price_val * 0.98
+                    oi_dir = _oi_dir_map.get(symbol, "→OI")
+                    共振标识 = "📉" if oi_dir == "↓OI" else ""
+                    cvd_rise_pct = (curr_cvd_peak - prev_cvd_peak) / abs(prev_cvd_peak) * 100
+                    base_strength = 3
+                    final_strength = max(1, base_strength + trend_adj)
+                    result["direction"] = "short"
+                    result["divergence_type"] = "cvd_top"
+                    result["共振"] = 共振标识
+                    pattern_tag = f"|形态={pattern}" if pattern in ["bearish_engulfing", "shooting_star"] else ""
+                    result["reason"] = (f"CVD顶背离(领先)：CVD新高 | 价格未新高{pattern_tag}{共振标识}")
+                    result["divergence_desc"] = result["reason"]
+                    result["strength"] = final_strength
+                    result["entry_price"] = round(entry_price, 4)
+                    result["stop_loss"] = round(sl_exact, 4)
+                    result["target1"] = round(tp1_exact, 4)
+                    result["target2"] = round(tp1_exact * 0.98, 4)
+                    result["_entry_exact"] = entry_price
+                    result["_sl_exact"] = sl_exact
+                    result["_tp1_exact"] = tp1_exact
+                    result["pattern"] = pattern
+                    result["cvd_strength"] = round(abs(cvd_rise_pct), 2)
+                    result["kline_idx"] = pp_nearest
+                    result["price_idx"] = pp_nearest
+                    result["_curr_cvd_peak_val"] = round(curr_cvd_peak, 2)
+                    result["_prev_cvd_peak_val"] = round(prev_cvd_peak, 2)
+                    result["_curr_price_peak_val"] = round(curr_price, 6)
+                    result["_prev_price_peak_val"] = round(prev_price_val, 6)
+                    result["_curr_cvd_peak_idx"] = int(ci)
+                    result["_prev_cvd_peak_idx"] = int(all_cp[-1])
+                    result["_curr_price_peak_idx"] = int(pp_nearest)
+                    result["_prev_price_peak_idx"] = int(prev_pp)
+                    # P0/P1 新增字段
+                    result["_cvd_roc"] = round(roc_val, 2)
+                    result["_cvd_trend"] = trend_structure
+                    return result
 
     return None
 
