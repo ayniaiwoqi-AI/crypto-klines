@@ -70,9 +70,8 @@ def random_delay():
 # ========== 获取交易对列表（只调用一次） ==========
 def get_trading_symbols() -> list[str]:
     url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-    # exchangeInfo 必须直连，代理对 fapi.binance.com 返回 418
     try:
-        with httpx.Client(timeout=15.0) as client:
+        with httpx.Client(proxy=PROXY, timeout=15.0) as client:
             resp = client.get(url)
             data = resp.json()
         symbols = [
