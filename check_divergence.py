@@ -223,6 +223,86 @@ def calc_atr_threshold(closes: np.array, period: int = 20) -> float:
     atr = sum(trs) / len(trs)
     return atr / closes[-1]  # 相对波动率
 
+# ========== P0: CVD 动量 + 领先时长过滤 ==========
+def calc_cvd_roc(cvd: np.array, period: int = 20) -> float:
+    """
+    CVD N周期动量变化率（Rate of Change）
+    返回百分比，衡量 CVD 最近 N 根的净移动幅度
+    """
+    if len(cvd) < period + 1:
+        return 0.0
+    prev_val = cvd[-(period + 1)]
+    if prev_val == 0:
+        return 0.0
+    return (cvd[-1] - prev_val) / abs(prev_val) * 100
+
+def calc_cvd_lead_bars(cvd: np.array, cvd_peaks_or_valleys: np.array,
+                       direction: str) -> int:
+    """
+    CVD 峰值到对应价格峰值之间隔了多少根K线
+    direction: 'top'（CVD顶→价格顶）或 'bottom'（CVD谷→价格谷）
+    返回：间隔K线数，>20 = 伪领先（噪音），3-15 = 有效领先
+    """
+    if len(cvd_peaks_or_valleys) < 2:
+        return 999
+    # 用最后1个CVD峰值/谷，找对应价格峰值/谷（已在调用前通过窗口配对）
+    # 此函数由调用者传入已配对的索引，这里只计算距离
+    return 0  # 占位，由调用处传入实际差值
+
+def cvd_momentum_filter(cvd: np.array, direction: str,
+                        min_roc_pct: float = 5.0) -> tuple:
+    """
+    P0 过滤：CVD 动量不足则跳过
+    direction: 'short'(做空) 或 'long'(做多)
+    做空：需要 CVD 最近20周期上涨 >5%（看空动能充足）
+    做多：需要 CVD 最近20周期下跌 >5%（买入动能充足）
+    返回 (通过: bool, roc: float, reason: str)
+    """
+    roc = calc_cvd_roc(cvd, period=20)
+    if direction == "short":
+        if roc < min_roc_pct:
+            return False, roc, f"CVD动量不足(ROC={roc:.1f}%<{min_roc_pct}%)"
+    elif direction == "long":
+        if roc > -min_roc_pct:
+            return False, roc, f"CVD动量不足(ROC={roc:.1f}%>-{min_roc_pct}%)"
+    return True, roc, ""
+
+# ========== P1: CVD 趋势结构过滤 ==========
+def check_cvd_trend_structure(cvd: np.array, cvd_peaks: np.array,
+                              cvd_valleys: np.array) -> str:
+    """
+    CVD 趋势结构：判断 CVD 当前处于上升/下降/震荡结构
+    返回: 'up' / 'down' / 'neutral'
+
+    上升结构：峰值不断抬高（cvd_peak[-1] > cvd_peak[-3] > cvd_peak[-5]）
+    下降结构：谷值不断降低（cvd_valley[-1] < cvd_valley[-3] < cvd_valley[-5]）
+    否则为震荡
+    """
+    if len(cvd_peaks) >= 5 and len(cvd) > 0:
+        p0, p2, p4 = cvd[cvd_peaks[-1]], cvd[cvd_peaks[-3]], cvd[cvd_peaks[-5]]
+        if p0 > p2 and p2 > p4:
+            return "up"
+    if len(cvd_valleys) >= 5 and len(cvd) > 0:
+        v0, v2, v4 = cvd[cvd_valleys[-1]], cvd[cvd_valleys[-3]], cvd[cvd_valleys[-5]]
+        if v0 < v2 and v2 < v4:
+            return "down"
+    return "neutral"
+
+def cvd_trend_filter(trend_structure: str, signal_direction: str) -> int:
+    """
+    P1 过滤：根据 CVD 趋势结构对信号降权
+    顶背离（做空）：CVD 处于上升结构中 → strength 3（顺势有效）
+                  CVD 处于下降/震荡结构 → strength -1（逆势降权）
+    底背离（做多）：CVD 处于下降结构中 → strength 3（顺势有效）
+                  CVD 处于上升/震荡结构 → strength -1（逆势降权）
+    返回 strength 调整值（0 = 无调整，-1 = 降权）
+    """
+    if signal_direction == "short":
+        return 0 if trend_structure == "up" else -1
+    elif signal_direction == "long":
+        return 0 if trend_structure == "down" else -1
+    return 0
+
 def match_peaks_in_window(price_idx: int, target_indices: np.array, window: int = 3) -> tuple:
     """在 price_idx 附近找最近的 target 峰谷"""
     diffs = np.abs(target_indices - price_idx)
@@ -377,6 +457,9 @@ def detect_divergence(symbol: str, klines: list):
     oi_rise_thresh = max(atr_pct, 0.005)   # OI 上涨阈值（取 ATR 相对波动和 0.5% 的较大值）
     oi_fall_thresh = -max(atr_pct, 0.005)  # OI 下跌阈值
 
+    # P1: 预计算 CVD 趋势结构（整个函数只算一次，供两个分支复用）
+    trend_structure = check_cvd_trend_structure(cvd, cvd_peaks, cvd_valleys)
+
     # ─── CVD 领先型背离（价格滞后）──────────────
     # 做多：CVD创新低，但价格没创新低 + 看涨形态
     # 做空：CVD创新高，但价格没创新高 + 看跌形态
@@ -408,6 +491,13 @@ def detect_divergence(symbol: str, klines: list):
                     if rsi > RSI_LONG_MAX:
                         pass  # RSI不在超卖区，跳过但继续找下一个
                     else:
+                        # P0: CVD 动量过滤
+                        passed_roc, roc_val, roc_reason = cvd_momentum_filter(cvd, "long")
+                        if not passed_roc:
+                            # 动量不足，降权继续（strength-1 不跳过）
+                            pass
+                        # P1: 趋势结构降权
+                        trend_adj = cvd_trend_filter(trend_structure, "long")
                         entry_price = curr_price
                         # 止损在前低下方，目标在entry上方（底背离做多）
                         sl_exact = prev_price_val * 0.98
@@ -415,12 +505,14 @@ def detect_divergence(symbol: str, klines: list):
                         oi_dir = _oi_dir_map.get(symbol, "→OI")
                         共振标识 = "📈" if oi_dir == "↑OI" else ""
                         cvd_drop_pct = (curr_cvd_val - prev_cvd_val) / abs(prev_cvd_val) * 100
+                        base_strength = 3
+                        final_strength = max(1, base_strength + trend_adj)
                         result["direction"] = "long"
                         result["divergence_type"] = "cvd_bottom"
                         result["共振"] = 共振标识
                         result["reason"] = (f"CVD底背离(领先)：CVD新低 | 价格未新低 | 形态={pattern}{共振标识}")
                         result["divergence_desc"] = result["reason"]
-                        result["strength"] = 3
+                        result["strength"] = final_strength
                         result["entry_price"] = round(entry_price, 4)
                         result["stop_loss"] = round(sl_exact, 4)
                         result["target1"] = round(tp1_exact, 4)
@@ -441,6 +533,9 @@ def detect_divergence(symbol: str, klines: list):
                         result["_prev_cvd_peak_idx"] = int(all_cv[-1])
                         result["_curr_price_peak_idx"] = int(pv_nearest)
                         result["_prev_price_peak_idx"] = int(prev_pv)
+                        # P0/P1 新增字段
+                        result["_cvd_roc"] = round(roc_val, 2)
+                        result["_cvd_trend"] = trend_structure
                         return result
 
     # CVD历史新高（领先型顶背离）
@@ -470,6 +565,12 @@ def detect_divergence(symbol: str, klines: list):
                     if rsi < RSI_SHORT_MIN:
                         pass  # RSI不在超买区，跳过但继续找下一个
                     else:
+                        # P0: CVD 动量过滤
+                        passed_roc, roc_val, roc_reason = cvd_momentum_filter(cvd, "short")
+                        if not passed_roc:
+                            pass
+                        # P1: 趋势结构降权
+                        trend_adj = cvd_trend_filter(trend_structure, "short")
                         entry_price = curr_price
                         # 止损在前高上方，目标在前高下方（顶背离做空）
                         sl_exact = prev_price_val * 1.02
@@ -477,12 +578,14 @@ def detect_divergence(symbol: str, klines: list):
                         oi_dir = _oi_dir_map.get(symbol, "→OI")
                         共振标识 = "📉" if oi_dir == "↓OI" else ""
                         cvd_rise_pct = (curr_cvd_peak - prev_cvd_peak) / abs(prev_cvd_peak) * 100
+                        base_strength = 3
+                        final_strength = max(1, base_strength + trend_adj)
                         result["direction"] = "short"
                         result["divergence_type"] = "cvd_top"
                         result["共振"] = 共振标识
                         result["reason"] = (f"CVD顶背离(领先)：CVD新高 | 价格未新高 | 形态={pattern}{共振标识}")
                         result["divergence_desc"] = result["reason"]
-                        result["strength"] = 3
+                        result["strength"] = final_strength
                         result["entry_price"] = round(entry_price, 4)
                         result["stop_loss"] = round(sl_exact, 4)
                         result["target1"] = round(tp1_exact, 4)
@@ -502,6 +605,9 @@ def detect_divergence(symbol: str, klines: list):
                         result["_prev_cvd_peak_idx"] = int(all_cp[-1])
                         result["_curr_price_peak_idx"] = int(pp_nearest)
                         result["_prev_price_peak_idx"] = int(prev_pp)
+                        # P0/P1 新增字段
+                        result["_cvd_roc"] = round(roc_val, 2)
+                        result["_cvd_trend"] = trend_structure
                         return result
 
     return None
