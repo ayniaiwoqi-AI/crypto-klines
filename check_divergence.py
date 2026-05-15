@@ -15,6 +15,7 @@ import requests
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy.signal import find_peaks
+import talib
 
 # ========== 配置 ==========
 KLINES_DIR = "/root/crypto_klines"
@@ -313,79 +314,47 @@ def match_peaks_in_window(price_idx: int, target_indices: np.array, window: int 
         return target_indices[min_idx], diffs[min_idx]
     return None, None
 
-# ========== K线形态检测 ==========
-def detect_engulfing(klines: list, pattern_idx: int) -> str:
+# ========== K线形态检测（TA-Lib） ==========
+def detect_pattern(klines: list, pattern_idx: int) -> str:
     """
-    检测吞没形态（需要回溯前1根确认）
+    TA-Lib K线形态检测（替代手写规则）
     pattern_idx: 形态所在的K线索引（从0开始，0是最老的）
-    返回: 'bullish_engulfing', 'bearish_engulfing', None
+    返回: 'hammer'(做多) | 'shooting_star'(做空) | 'bullish_engulfing'(做多) | 'bearish_engulfing'(做空) | None
     """
     n = len(klines)
-    # 需要前一前一后两根K线
-    if pattern_idx < 1 or pattern_idx >= n - 1:
+    if pattern_idx < 0 or pattern_idx >= n:
         return None
-    
-    prev = klines[pattern_idx - 1]
-    curr = klines[pattern_idx]
-    next_k = klines[pattern_idx + 1]  # 下一根确认用，但形态确认用curr
-    
-    # 前一根
-    prev_is_bearish = prev["c"] < prev["o"]
-    prev_is_bullish = prev["c"] > prev["o"]
-    # 当前根
-    curr_is_bearish = curr["c"] < curr["o"]
-    curr_is_bullish = curr["c"] > curr["o"]
-    
-    # 阳吞阴（做多）
-    if prev_is_bearish and curr_is_bullish:
-        # 实体部分吞没
-        if curr["c"] > prev["o"] and curr["o"] < prev["c"]:
-            return "bullish_engulfing"
-    
-    # 阴吞阳（做空）
-    if prev_is_bullish and curr_is_bearish:
-        if curr["c"] < prev["o"] and curr["o"] > prev["c"]:
-            return "bearish_engulfing"
-    
-    return None
 
-def detect_hammer(klines: list, pattern_idx: int) -> str:
-    """
-    检测锤子线 / 射击之星
-    """
-    if pattern_idx < 1 or pattern_idx >= len(klines) - 1:
+    # 提取最近30根K线（TA-Lib 需要足够历史数据）
+    lookback = min(30, pattern_idx + 1)
+    start = pattern_idx - lookback + 1
+    segment = klines[start:pattern_idx + 1]
+
+    if len(segment) < lookback:
         return None
-    
-    k = klines[pattern_idx]
-    body = abs(k["c"] - k["o"])
-    upper_shadow = k["h"] - max(k["o"], k["c"])
-    lower_shadow = min(k["o"], k["c"]) - k["l"]
-    
-    if body == 0:
-        return None
-    
-    # 锤子线（做多）
-    if (lower_shadow >= 2 * body and
-        upper_shadow <= 0.5 * body and
-        lower_shadow > 0):
+
+    opens = np.array([k["o"] for k in segment], dtype=np.float64)
+    highs = np.array([k["h"] for k in segment], dtype=np.float64)
+    lows = np.array([k["l"] for k in segment], dtype=np.float64)
+    closes = np.array([k["c"] for k in segment], dtype=np.float64)
+
+    # 取当前根在数组中的位置
+    idx_in_lookback = len(segment) - 1
+
+    # ─── 吞没形态 ───
+    engulfing = talib.CDLENGULFING(opens, highs, lows, closes)
+    if engulfing[idx_in_lookback] != 0:
+        return "bullish_engulfing" if engulfing[idx_in_lookback] > 0 else "bearish_engulfing"
+
+    # ─── 锤子线 / 射击之星 ───
+    hammer = talib.CDLHAMMER(opens, highs, lows, closes)
+    if hammer[idx_in_lookback] != 0:
         return "hammer"
-    
-    # 射击之星（做空）
-    if (upper_shadow >= 2 * body and
-        lower_shadow <= 0.5 * body and
-        upper_shadow > 0):
-        return "shooting_star"
-    
-    return None
 
-def detect_pattern(klines: list, pattern_idx: int) -> str:
-    """综合形态检测"""
-    eng = detect_engulfing(klines, pattern_idx)
-    if eng:
-        return eng
-    hammer = detect_hammer(klines, pattern_idx)
-    if hammer:
-        return hammer
+    shooting_star = talib.CDLSHOOTINGSTAR(opens, highs, lows, closes)
+    if shooting_star[idx_in_lookback] != 0:
+        return "shooting_star"
+
     return None
 
 # ========== 背离检测 ==========
