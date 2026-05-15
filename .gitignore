@@ -1,0 +1,17 @@
+# 缓存文件
+*.json
+!.gitignore
+!.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 环境变量
+.env
+.env.local
+
+# 临时文件
+*.tmp
+*.log
