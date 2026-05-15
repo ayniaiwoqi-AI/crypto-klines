@@ -90,12 +90,20 @@ def fmt_signal(sig: dict) -> str:
     oi_dir = sig.get("oi_direction", "")
     共振标识 = "📉" if oi_dir == "↓OI" else "📈" if oi_dir == "↑OI" else ""
 
+    # 自适应小数位
+    def fmt_price(p):
+        if p is None: return "N/A"
+        if p >= 1: return f"{p:.4f}"
+        if p >= 0.01: return f"{p:.4f}"
+        if p >= 0.0001: return f"{p:.5f}"
+        return f"{p:.8f}"
+
     entry = sig.get("_entry_exact", sig["entry_price"])
     sl = sig.get("_sl_exact", sig["stop_loss"])
     tp1 = sig.get("_tp1_exact", sig["target1"])
 
     if sig["direction"] == "long":
-        sl_pct = (entry - sl) / entry * 100
+        sl_pct = (entry - sl) / entry * 100  # 正数，但表示亏损
         tp_pct = (tp1 - entry) / entry * 100
     else:
         sl_pct = (sl - entry) / entry * 100
@@ -112,14 +120,25 @@ def fmt_signal(sig: dict) -> str:
     prev_cvd = sig.get("_prev_cvd_peak_val")
     curr_price = sig.get("_curr_price_peak_val")
     prev_price = sig.get("_prev_price_peak_val")
-    if curr_cvd and prev_cvd:
-        cvd_str = f"CVD {curr_cvd/1e6:.1f}M >前高 {prev_cvd/1e6:.1f}M"
+    if sig["divergence_type"] == "cvd_bottom":
+        # 底背离：价格未新低
+        if curr_cvd and prev_cvd:
+            cvd_str = f"CVD {curr_cvd/1e6:.1f}M <前低 {prev_cvd/1e6:.1f}M"
+        else:
+            cvd_str = "CVD创新低"
+        price_str = f"价格{fmt_price(curr_price)}>=前低{fmt_price(prev_price)}" if (curr_price and prev_price) else "价格未新低"
     else:
-        cvd_str = f"CVD创新高"
-    price_str = f"价格{curr_price}<=前高{prev_price}" if (curr_price and prev_price) else "价格未新高"
+        # 顶背离：价格未新高
+        if curr_cvd and prev_cvd:
+            cvd_str = f"CVD {curr_cvd/1e6:.1f}M >前高 {prev_cvd/1e6:.1f}M"
+        else:
+            cvd_str = "CVD创新高"
+        price_str = f"价格{fmt_price(curr_price)}<=前高{fmt_price(prev_price)}" if (curr_price and prev_price) else "价格未新高"
 
     line1 = f"{emoji}{sym} | {div} | {pattern}{共振标识} | {oi_line}"
-    line2 = f"  入{entry} | 损{sl}({sl_pct:+.1f}%) | 目{tp1}({tp_pct:+.1f}%)"
+    # 做多止损是亏损，显示为负
+    sl_display_pct = sl_pct if sig["direction"] == "short" else -sl_pct
+    line2 = f"  入{fmt_price(entry)} | 损{fmt_price(sl)}({sl_display_pct:+.1f}%) | 目{fmt_price(tp1)}({tp_pct:+.1f}%)"
     line3 = f"  {cvd_str} | {price_str}"
     return "\n".join([line1, line2, line3])
 

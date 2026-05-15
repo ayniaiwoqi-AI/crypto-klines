@@ -331,8 +331,9 @@ def detect_divergence(symbol: str, klines: list):
                 pattern = detect_pattern(klines, pv_nearest)
                 if pattern in ["bullish_engulfing", "hammer"]:
                     entry_price = curr_price
-                    stop_loss = round(prev_price_val * 0.98, 4)
-                    target1 = round(prev_price_val * 1.02, 4)
+                    # 止损在前低下方，目标在entry上方（底背离做多）
+                    sl_exact = prev_price_val * 0.98
+                    tp1_exact = entry_price * 1.02
                     oi_dir = _oi_dir_map.get(symbol, "→OI")
                     共振标识 = "📈" if oi_dir == "↑OI" else ""
                     cvd_drop_pct = (curr_cvd_val - prev_cvd_val) / abs(prev_cvd_val) * 100
@@ -343,17 +344,26 @@ def detect_divergence(symbol: str, klines: list):
                     result["divergence_desc"] = result["reason"]
                     result["strength"] = 3
                     result["entry_price"] = round(entry_price, 4)
-                    result["stop_loss"] = round(stop_loss, 4)
-                    result["target1"] = round(target1, 4)
-                    result["target2"] = round(prev_price_val * 1.03, 4)
+                    result["stop_loss"] = round(sl_exact, 4)
+                    result["target1"] = round(tp1_exact, 4)
+                    result["target2"] = round(tp1_exact * 1.02, 4)
                     # 存精确值用于显示百分比（避免小数值四舍五入失真）
                     result["_entry_exact"] = entry_price
-                    result["_sl_exact"] = stop_loss
-                    result["_tp1_exact"] = target1
+                    result["_sl_exact"] = sl_exact
+                    result["_tp1_exact"] = tp1_exact
                     result["pattern"] = pattern
                     result["cvd_strength"] = round(abs(cvd_drop_pct), 2)
                     result["kline_idx"] = pv_nearest
                     result["price_idx"] = pv_nearest
+                    # 波峰波谷详情（用于展示）
+                    result["_curr_cvd_peak_val"] = round(curr_cvd_val, 2)
+                    result["_prev_cvd_peak_val"] = round(prev_cvd_val, 2)
+                    result["_curr_price_peak_val"] = round(curr_price, 6)
+                    result["_prev_price_peak_val"] = round(prev_price_val, 6)
+                    result["_curr_cvd_peak_idx"] = int(ci)
+                    result["_prev_cvd_peak_idx"] = int(all_cv[-1])
+                    result["_curr_price_peak_idx"] = int(pv_nearest)
+                    result["_prev_price_peak_idx"] = int(prev_pv)
                     return result
 
     # CVD历史新高（领先型顶背离）
@@ -380,8 +390,9 @@ def detect_divergence(symbol: str, klines: list):
                 pattern = detect_pattern(klines, pp_nearest)
                 if pattern in ["bearish_engulfing", "shooting_star"]:
                     entry_price = curr_price
-                    stop_loss = round(prev_price_val * 1.02, 4)
-                    target1 = round(prev_price_val * 0.98, 4)
+                    # 止损在前高上方，目标在前高下方（顶背离做空）
+                    sl_exact = prev_price_val * 1.02
+                    tp1_exact = prev_price_val * 0.98
                     oi_dir = _oi_dir_map.get(symbol, "→OI")
                     共振标识 = "📉" if oi_dir == "↓OI" else ""
                     cvd_rise_pct = (curr_cvd_peak - prev_cvd_peak) / abs(prev_cvd_peak) * 100
@@ -392,12 +403,12 @@ def detect_divergence(symbol: str, klines: list):
                     result["divergence_desc"] = result["reason"]
                     result["strength"] = 3
                     result["entry_price"] = round(entry_price, 4)
-                    result["stop_loss"] = round(stop_loss, 4)
-                    result["target1"] = round(target1, 4)
-                    result["target2"] = round(prev_price_val * 0.97, 4)
+                    result["stop_loss"] = round(sl_exact, 4)
+                    result["target1"] = round(tp1_exact, 4)
+                    result["target2"] = round(tp1_exact * 0.98, 4)
                     result["_entry_exact"] = entry_price
-                    result["_sl_exact"] = stop_loss
-                    result["_tp1_exact"] = target1
+                    result["_sl_exact"] = sl_exact
+                    result["_tp1_exact"] = tp1_exact
                     result["pattern"] = pattern
                     result["cvd_strength"] = round(abs(cvd_rise_pct), 2)
                     result["kline_idx"] = pp_nearest
