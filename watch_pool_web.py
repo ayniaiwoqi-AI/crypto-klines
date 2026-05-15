@@ -221,8 +221,12 @@ const REFRESH = {{ refresh_interval }};
 
 function timeAgo(isoStr) {
   if (!isoStr) return '—';
-  const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
-  if (diff < 60)  return Math.floor(diff) + 's前';
+  // 统一按北京时间(+08:00)计算，不受浏览器本地时区影响
+  const BJ_OFFSET = 8 * 60; // 北京UTC+8，分钟
+  const ms = new Date(isoStr).getTime();
+  const nowMs = Date.now();
+  const diff = (nowMs - ms) / 1000;
+  if (diff < 60)   return Math.floor(diff) + 's前';
   if (diff < 3600) return Math.floor(diff/60) + 'm前';
   return Math.floor(diff/3600) + 'h前';
 }
@@ -289,9 +293,16 @@ function render(pool, status) {
   document.getElementById('stat-short').textContent = '做空 ' + shorts;
   document.getElementById('stat-new').textContent = '本轮 +' + (status.new_signals_this_run || 0);
 
-  const updated = status.generated_at
-    ? new Date(status.generated_at).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',second:'2-digit'})
-    : '—';
+  // 北京时间格式化（显式加8小时，不受浏览器本地时区干扰）
+  function fmtBJTime(isoStr) {
+    if (!isoStr) return '—';
+    const d = new Date(isoStr);
+    const bj = new Date(d.getTime() + 8 * 3600 * 1000);
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(bj.getUTCHours())}:${pad(bj.getUTCMinutes())}:${pad(bj.getUTCSeconds())}`;
+  }
+
+  const updated = status.generated_at ? fmtBJTime(status.generated_at) : '—';
   document.getElementById('meta').textContent =
     `K线 ${status.kline_files || 0} 个 | 池 ${symbols.length} 个 | 更新 ${updated}`;
 
